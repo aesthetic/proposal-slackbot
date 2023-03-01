@@ -4,6 +4,15 @@ const web3 = require('web3')
 
 dotenv.config()
 
+const webhookMap = {
+    'aave': process.env.SLACK_AAVE_WEBHOOK,
+    'compound': process.env.SLACK_COMPOUND_WEBHOOK,
+    'uniswap': process.env.SLACK_UNISWAP_WEBHOOK,
+    'euler': process.env.SLACK_EULER_WEBHOOK,
+    'main': process.env.SLACK_MAIN_WEBHOOK,
+    'proposal-notifs': process.env.SLACK_PROPOSAL_NOTIFS_WEBHOOK
+}
+
 async function getBlockNumber() {
     var web3Client = await new web3(process.env.ALCHEMY_API);
     var blockNumber = null;
@@ -28,7 +37,7 @@ async function getProposals() {
     // Get block from a day ago
     let queryBlock = blockNumber - 7109;
     console.log("Querying block " + queryBlock)
-    const response = await axios.get('http://localhost:3000/api/proposal', {
+    const response = await axios.get(process.env.PROP_API, {
         params: {
             blockNumber: queryBlock
         }
@@ -48,7 +57,11 @@ async function getProposals() {
     
       });
     let proposals = response.data.proposals;
-    message = ""
+    return proposals;
+}
+
+function createMessage(proposals, firstLine="") {
+    message = firstLine;
     proposals.forEach((p) => {
         var daysLeft = p.remainingTime / 86400;
         var hoursLeft = (daysLeft - Math.floor(daysLeft)) * 24;
@@ -62,13 +75,47 @@ async function getProposals() {
 
 async function postToSlack() {
     console.log("Fetching proposals...")
-    let message = await getProposals();
-    console.log(message);
-    return;
-    const response = await axios.post(process.env.SLACK_INCOMING_WEBHOOK, {
-            text: message
+    let props = await getProposals();
+    var today = new Date();
+    var dd = String(today.getDate()).padStart(2, '0');
+    var mm = String(today.getMonth() + 1).padStart(2, '0'); //January is 0!
+    today = mm + '/' + dd
+
+    //Create a message for the main channel that gives today's date and how many votes are due today.
+
+    let dueToday = props.filter(p => p.remainingTime < 86400);
+    let mainMessage = "Good Afternoon! We have " + dueToday.length + " proposal votes that are ending today (" + today + ").\n\n";
+    mainMessage += "AAVE: " + dueToday.filter(p => p.platform == "Aave").length + "\n";
+    mainMessage += "Compound: " + dueToday.filter(p => p.platform == "Compound").length + "\n";
+    mainMessage += "Uniswap: " + dueToday.filter(p => p.platform == "Uniswap").length + "\n";
+    mainMessage += "Euler: " + dueToday.filter(p => p.platform == "Euler").length + "\n";
+    
+    const mainResponse = await axios.post(webhookMap["main"], {
+        text: mainMessage
     });
-    console.log(response.status);
+    console.log("Posted to main channel: " + mainResponse.status);
+
+    //Create a message for each protocol
+    for(const [key, value] of Object.entries(webhookMap)) {
+        if (key == "proposal-notifs" || key == "main") {
+            continue;
+        }
+        let protocolProps = props.filter(p => p.platform.toLowerCase() == key);
+        if(protocolProps.length == 0) {
+            continue;
+        }
+        let message = createMessage(protocolProps, "Hello " + ":" + key + ":" + " team! Here are the props that need review:\n\n");
+        console.log(message);
+        const response = await axios.post(value, {
+            text: message
+        });
+        console.log("Posted to " + key + " channel: " + response.status);
+    }
+    let AllProtocolsMessage = createMessage(props);
+    const allProtocolsResponse = await axios.post(webhookMap["proposal-notifs"], {
+        text: AllProtocolsMessage
+    });
+    console.log("Posted to proposal-notifs channel: " + allProtocolsResponse.status);
 }
 
 let response = postToSlack();
